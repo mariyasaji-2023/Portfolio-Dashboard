@@ -24,8 +24,7 @@ interface PortfolioItem {
   sector: string;
 }
 
-const filePath = path.join(__dirname, "Sample_Portfolio_BE_5668CF4AE9.xlsx");
-
+const filePath = path.join(__dirname, "..", "..", "Sample_Portfolio_BE_5668CF4AE9.xlsx");
 // Cache setup (store portfolio for 15s)
 const cache = new NodeCache({ stdTTL: 15 });
 
