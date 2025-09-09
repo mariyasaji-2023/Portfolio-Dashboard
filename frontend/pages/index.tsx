@@ -148,7 +148,68 @@ export default function Home() {
   });
 
   // ✅ Conditional rendering AFTER hooks
-  if (isLoading) return <div style={{padding: '40px', textAlign: 'center', fontSize: '18px'}}>Loading portfolio...</div>;
+  if (isLoading) {
+    return (
+      <div style={{
+        minHeight: '100vh',
+        backgroundColor: '#f8fafc',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexDirection: 'column',
+        gap: '24px'
+      }}>
+        {/* Animated loading spinner */}
+        <div style={{
+          width: '60px',
+          height: '60px',
+          border: '4px solid #e5e7eb',
+          borderTop: '4px solid #3b82f6',
+          borderRadius: '50%',
+          animation: 'spin 1s linear infinite'
+        }}></div>
+        
+        {/* Loading text with dots animation */}
+        <div style={{
+          fontSize: '18px',
+          color: '#6b7280',
+          fontWeight: '500',
+          textAlign: 'center'
+        }}>
+          <span>Loading your portfolio</span>
+          <span style={{
+            display: 'inline-block',
+            animation: 'dots 1.5s infinite'
+          }}>...</span>
+        </div>
+        
+        {/* Fun loading messages that change */}
+        <div style={{
+          fontSize: '14px',
+          color: '#9ca3af',
+          textAlign: 'center',
+          fontStyle: 'italic',
+          maxWidth: '300px'
+        }}>
+          Fetching your latest stock prices and calculating gains...
+        </div>
+
+        {/* Add CSS animations */}
+        <style jsx>{`
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+          
+          @keyframes dots {
+            0%, 20% { opacity: 0; }
+            50% { opacity: 1; }
+            100% { opacity: 0; }
+          }
+        `}</style>
+      </div>
+    );
+  }
   if (error) return <div style={{padding: '40px', textAlign: 'center', fontSize: '18px', color: '#dc2626'}}>Failed to load data</div>;
   if (isEmpty) return <div style={{padding: '40px', textAlign: 'center', fontSize: '18px', color: '#6b7280'}}>No portfolio data available</div>;
 
