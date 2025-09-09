@@ -5,7 +5,7 @@ const fetcher = (url: string) => axios.get(url).then(res => res.data);
 
 export function usePortfolioData() {
   const { data, error, isLoading } = useSWR(
-  "http://localhost:4000/api/portfolio",
+  "https://portfolio-dashboard-gmfd.onrender.com/api/portfolio",
   fetcher,
   { refreshInterval: 15000 }
 );
