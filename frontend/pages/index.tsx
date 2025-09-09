@@ -25,9 +25,16 @@ interface PortfolioItem {
   sector: string;
 }
 
+// Define the sorting state type
+type SortingState = Array<{
+  id: string;
+  desc: boolean;
+}>;
+
 export default function Home() {
-  const { data, error, isLoading, isEmpty } = usePortfolioData();
-  const [sorting, setSorting] = useState([]);
+  const { data, error, isLoading } = usePortfolioData();
+  const isEmpty = !data || data.length === 0;
+  const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState("");
 
   // ✅ Define table columns with ALL required fields
