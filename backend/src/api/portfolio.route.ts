@@ -1,14 +1,12 @@
-import { Router } from "express";
+import { Router } from "express"; 
 import * as XLSX from "xlsx";
 import path from "path";
 import yahooFinance from "yahoo-finance2";
-import axios from "axios";
-import * as cheerio from "cheerio";
 import NodeCache from "node-cache";
+import cron from "node-cron";
 
 const router = Router();
 
-// Define portfolio item type
 interface PortfolioItem {
   stockName: string;
   purchasePrice: number;
@@ -25,10 +23,10 @@ interface PortfolioItem {
 }
 
 const filePath = path.join(__dirname, "..", "..", "Sample_Portfolio_BE_5668CF4AE9.xlsx");
-// Cache setup (store portfolio for 15s)
-const cache = new NodeCache({ stdTTL: 15 });
 
-// 🔹 Mapping: Excel names/codes → Yahoo Finance tickers
+// Increased cache time to 10 minutes since we're doing batch updates
+const cache = new NodeCache({ stdTTL: 600 });
+
 const stockSymbolMap: Record<string, string> = {
   "HDFC Bank": "HDFCBANK.NS",
   "Bajaj Finance": "BAJFINANCE.NS",
@@ -59,42 +57,103 @@ const stockSymbolMap: Record<string, string> = {
   "Easemytrip": "EASEMYTRIP.NS",
 };
 
-// 🔹 Helper: fetch CMP from Yahoo Finance
-async function fetchYahooCMP(symbol: string) {
-  try {
-    const quote = await yahooFinance.quote(symbol);
-    return quote.regularMarketPrice || null;
-  } catch (err) {
-    console.error(`Yahoo fetch failed for ${symbol}`, err);
-    return null;
-  }
+// 🔹 Helper: Create timeout promise
+function createTimeoutPromise<T>(ms: number): Promise<T> {
+  return new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms)
+  );
 }
 
-// 🔹 Helper: fetch P/E & Earnings from Google Finance
-async function fetchGoogleFinance(symbol: string, exchange: string) {
+// 🔹 OPTIMIZED: Batch fetch multiple quotes at once
+async function fetchBatchQuotes(symbols: string[]): Promise<Map<string, any>> {
+  const results = new Map<string, any>();
+  
   try {
-    const url = `https://www.google.com/finance/quote/${symbol}:${exchange}`;
-    const { data } = await axios.get(url, {
-      headers: { "User-Agent": "Mozilla/5.0" }, // avoid bot block
+    // Yahoo Finance supports batch requests - much faster!
+    const quotes = await Promise.race([
+      yahooFinance.quote(symbols),
+      createTimeoutPromise<any>(8000) // 8 second timeout for batch
+    ]);
+
+    // Handle both single quote and array of quotes
+    const quotesArray = Array.isArray(quotes) ? quotes : [quotes];
+    
+    quotesArray.forEach((quote: any) => {
+      if (quote && quote.symbol) {
+        results.set(quote.symbol, quote);
+      }
     });
-    const $ = cheerio.load(data);
-
-    // ⚠️ Selectors may change, adjust if needed
-    const peRatio = $('div[aria-label="Price to earnings ratio"]').text().trim();
-    const earnings = $('div[aria-label="Earnings per share"]').text().trim();
-
-    return {
-      peRatio: peRatio ? parseFloat(peRatio) : null,
-      latestEarnings: earnings || null,
-    };
   } catch (err) {
-    console.error(`Google Finance fetch failed for ${symbol}`, err);
-    return { peRatio: null, latestEarnings: null };
+    console.error(`Batch Yahoo fetch failed:`, err instanceof Error ? err.message : err);
   }
+
+  return results;
 }
 
-// 🔹 Build portfolio function (with live data)
+// 🔹 OPTIMIZED: Process stocks in smaller batches
+async function processStocksBatch(items: PortfolioItem[], batchSize: number = 10): Promise<PortfolioItem[]> {
+  const results: PortfolioItem[] = [];
+  
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const symbols = batch
+      .map(item => stockSymbolMap[item.stockName])
+      .filter((symbol): symbol is string => Boolean(symbol));
+
+    console.log(`📊 Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(items.length/batchSize)}`);
+
+    // Fetch all quotes for this batch at once
+    const quotesMap = await fetchBatchQuotes(symbols);
+
+    // Process each item in the batch
+    const processedBatch = batch.map(item => {
+      const yahooSymbol = stockSymbolMap[item.stockName];
+      
+      if (!yahooSymbol) {
+        console.warn(`⚠️ No Yahoo mapping for: ${item.stockName}`);
+        return item;
+      }
+
+      const quote = quotesMap.get(yahooSymbol);
+      
+      if (quote) {
+        // Get current market price
+        const cmp = quote.regularMarketPrice || quote.price || null;
+        
+        if (cmp && typeof cmp === 'number') {
+          item.cmp = cmp;
+          item.presentValue = item.cmp * item.qty;
+          item.gainLoss = item.presentValue - item.investment;
+        }
+
+        // Get P/E ratio from Yahoo (more reliable than scraping)
+        item.peRatio = quote.trailingPE || quote.forwardPE || null;
+        
+        // Get earnings data
+        item.latestEarnings = quote.epsTrailingTwelveMonths || 
+                             quote.epsForward || 
+                             quote.earningsPerShare || null;
+      }
+
+      return item;
+    });
+
+    results.push(...processedBatch);
+    
+    // Small delay between batches to be respectful to the API
+    if (i + batchSize < items.length) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+
+  return results;
+}
+
+// 🔹 OPTIMIZED: Build portfolio with batch processing
 async function buildPortfolio(): Promise<PortfolioItem[]> {
+  console.log("📊 Building portfolio with optimizations...");
+  const startTime = Date.now();
+
   const workbook = XLSX.readFile(filePath);
 
   if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
@@ -103,10 +162,7 @@ async function buildPortfolio(): Promise<PortfolioItem[]> {
 
   const sheetName = workbook.SheetNames[0]!;
   const sheet = workbook.Sheets[sheetName]!;
-  const rawData = XLSX.utils.sheet_to_json<any>(sheet, {
-    defval: null,
-    range: 1,
-  });
+  const rawData = XLSX.utils.sheet_to_json<any>(sheet, { defval: null, range: 1 });
 
   let currentSector = "Unknown";
   const portfolio: PortfolioItem[] = [];
@@ -116,19 +172,16 @@ async function buildPortfolio(): Promise<PortfolioItem[]> {
     const purchasePrice = Number(row["Purchase Price"] || 0);
     const qty = Number(row["Qty"] || 0);
 
-    // ✅ Detect sector row
     if (!purchasePrice && !qty && stockName && stockName.includes("Sector")) {
       currentSector = stockName.trim();
       continue;
     }
 
-    if (!stockName || (!purchasePrice && !qty)) {
-      continue;
-    }
+    if (!stockName || (!purchasePrice && !qty)) continue;
 
     const investment = purchasePrice * qty;
 
-    const item: PortfolioItem = {
+    portfolio.push({
       stockName,
       purchasePrice,
       qty,
@@ -141,69 +194,151 @@ async function buildPortfolio(): Promise<PortfolioItem[]> {
       peRatio: null,
       latestEarnings: null,
       sector: currentSector,
-    };
-
-    // 🔹 Fetch Live Data
-    try {
-      const yahooSymbol = stockSymbolMap[item.stockName];
-      if (yahooSymbol) {
-        item.cmp = await fetchYahooCMP(yahooSymbol);
-        if (item.cmp) {
-          item.presentValue = item.cmp * item.qty;
-          item.gainLoss = item.presentValue - item.investment;
-        }
-      } else {
-        console.warn(`⚠️ No Yahoo mapping for: ${item.stockName}`);
-      }
-
-      // Google Finance (use NSE as default exchange)
-      const gData = await fetchGoogleFinance(
-        yahooSymbol?.replace(".NS", "") || item.stockName,
-        "NSE"
-      );
-      item.peRatio = gData.peRatio;
-      item.latestEarnings = gData.latestEarnings;
-    } catch (err) {
-      console.warn("API fetch failed for", stockName, err);
-    }
-
-    portfolio.push(item);
+    });
   }
 
-  // ✅ Portfolio %
-  const totalInvestment = portfolio.reduce(
-    (sum, stock) => sum + stock.investment,
-    0
-  );
+  // 🚀 OPTIMIZED: Process all stocks in batches instead of one by one
+  const portfolioWithData = await processStocksBatch(portfolio, 10);
 
-  portfolio.forEach((stock) => {
+  const totalInvestment = portfolioWithData.reduce((sum, stock) => sum + stock.investment, 0);
+
+  portfolioWithData.forEach((stock) => {
     stock.portfolioPercent = totalInvestment
       ? (stock.investment / totalInvestment) * 100
       : 0;
   });
 
-  return portfolio;
+  const duration = (Date.now() - startTime) / 1000;
+  console.log(`✅ Portfolio built in ${duration.toFixed(2)} seconds`);
+
+  return portfolioWithData;
 }
 
-// 🔹 API Route with caching
-router.get("/", async (req, res) => {
+// 🔹 Seed cache at startup
+async function seedCache() {
+  console.log("🚀 Seeding cache at startup...");
   try {
-    const cached = cache.get<PortfolioItem[]>("portfolio");
-    if (cached) {
-      console.log("✅ Serving from cache");
-      return res.json(cached);
-    }
-
     const portfolio = await buildPortfolio();
-
-    // Save to cache
     cache.set("portfolio", portfolio);
+    console.log("✅ Cache seeded successfully");
+  } catch (err) {
+    console.error("❌ Failed to seed cache:", err);
+  }
+}
 
-    res.json(portfolio);
-  } catch (error) {
-    console.error("Error in /portfolio:", error);
-    res.status(500).json({ error: "Failed to fetch portfolio data" });
+// 🔹 OPTIMIZED: Auto-refresh cache every 10 minutes instead of 5
+cron.schedule("*/10 * * * *", async () => {
+  console.log("🔄 Auto-refreshing portfolio...");
+  try {
+    const portfolio = await buildPortfolio();
+    cache.set("portfolio", portfolio);
+    console.log("✅ Auto-refresh success");
+  } catch (err) {
+    console.error("❌ Auto-refresh failed:", err);
   }
 });
+
+// 🔹 OPTIMIZED: API Route with better caching strategy
+router.get("/", async (req, res) => {
+  const cached = cache.get<PortfolioItem[]>("portfolio");
+  
+  if (cached) {
+    return res.json({
+      success: true,
+      data: cached,
+      cached: true,
+      timestamp: new Date().toISOString(),
+      totalStocks: cached.length
+    });
+  }
+
+  // If cache is empty, try to build portfolio but with timeout
+  try {
+    console.log("⚠️ Cache miss - building portfolio on-demand");
+    
+    const portfolioPromise = buildPortfolio();
+    const timeoutPromise = createTimeoutPromise<PortfolioItem[]>(15000); // 15 second max
+    
+    const portfolio = await Promise.race([portfolioPromise, timeoutPromise]);
+    
+    cache.set("portfolio", portfolio);
+    
+    res.json({
+      success: true,
+      data: portfolio,
+      cached: false,
+      timestamp: new Date().toISOString(),
+      totalStocks: portfolio.length
+    });
+  } catch (error) {
+    res.status(503).json({
+      success: false,
+      message: "Portfolio data is being built in the background. Please try again in a few moments.",
+      timestamp: new Date().toISOString(),
+      error: error instanceof Error ? error.message : "Unknown error"
+    });
+  }
+});
+
+// 🔹 Health check with more details
+router.get("/health", (req, res) => {
+  const cacheStats = cache.getStats();
+  const portfolio = cache.get<PortfolioItem[]>("portfolio");
+  
+  res.json({
+    status: "healthy",
+    cache: { 
+      keys: cache.keys().length, 
+      stats: cacheStats,
+      portfolioLoaded: !!portfolio,
+      stockCount: portfolio?.length || 0
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+// 🔹 Force refresh with async option
+router.post("/refresh", async (req, res) => {
+  const { async = false } = req.body;
+  
+  try {
+    cache.del("portfolio");
+    
+    if (async) {
+      // Start refresh in background
+      buildPortfolio().then(portfolio => {
+        cache.set("portfolio", portfolio);
+        console.log("✅ Async refresh completed");
+      }).catch(err => {
+        console.error("❌ Async refresh failed:", err);
+      });
+      
+      res.json({
+        success: true,
+        message: "Portfolio refresh started in background",
+        async: true,
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      const portfolio = await buildPortfolio();
+      cache.set("portfolio", portfolio);
+      res.json({
+        success: true,
+        message: "Portfolio refreshed successfully",
+        data: portfolio,
+        timestamp: new Date().toISOString()
+      });
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: "Failed to refresh portfolio",
+      message: error instanceof Error ? error.message : "Unknown error"
+    });
+  }
+});
+
+// Initialize cache after a short delay to let the server start
+setTimeout(seedCache, 2000);
 
 export default router;
